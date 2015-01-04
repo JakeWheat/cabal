@@ -20,6 +20,7 @@ import Control.Exception
 import System.IO.Error
 import qualified Control.Exception as C
 import Control.Concurrent
+import System.Environment
 --import Control.Monad.Error
 
 die :: String -> IO ()
@@ -42,65 +43,65 @@ tempWantPackages =
 
 main :: IO ()
 main = do
-  -- check for verbose
-  -- check CC, LINK, LD, GHC, GHC-PKG
-  -- check running in right directory
-  -- lazily find a download program
-  cwdOk <- doesFileExist "./cabal-install.cabal"
-  unless cwdOk $ die "The Bootstrap.hs program must be run in the cabal-install directory"
-  -- create sandbox
-  currentDirectory <- getCurrentDirectory
-  let sandboxPath = currentDirectory </> ".cabal-sandbox"
-      packageDb = sandboxPath </> "x86_64-linux-ghc-7.8.4-packages.conf.d"
-  putStrLn packageDb
-  packageDbAlready <- doesDirectoryExist packageDb
-  putStrLn $ show packageDbAlready
-  unless packageDbAlready $ void $ runIt "ghc-pkg" ["init", packageDb]
-  -- find which packages need to be installed
-  alreadyInstalledPackagesRaw <- runIt "ghc-pkg" ["list"
-                                                 ,"--package-db"
-                                                 ,packageDb]
-  putStrLn alreadyInstalledPackagesRaw
-  let alreadyInstalledPackages = parseGhcPkgList alreadyInstalledPackagesRaw
-      packagesToInstall = tempWantPackages \\ alreadyInstalledPackages
-      wantedTarballs = map (`addExtension` "tar.gz") packagesToInstall
-  -- find which packages also need to be downloaded
-  filesInCwd <- getDirectoryContents "."
-  let tarballsToDownload = wantedTarballs \\ filesInCwd
-  putStrLn $ show tarballsToDownload
+    -- check for verbose
+    -- check CC, LINK, LD, GHC, GHC-PKG
+    -- check running in right directory
+    -- lazily find a download program
+    cwdOk <- doesFileExist "./cabal-install.cabal"
+    unless cwdOk $ die "The Bootstrap.hs program must be run in the cabal-install directory"
+    -- create sandbox
+    currentDirectory <- getCurrentDirectory
+    let sandboxPath = currentDirectory </> ".cabal-sandbox"
+        packageDb = sandboxPath </> "x86_64-linux-ghc-7.8.4-packages.conf.d"
+    putStrLn packageDb
+    packageDbAlready <- doesDirectoryExist packageDb
+    putStrLn $ show packageDbAlready
+    unless packageDbAlready $ void $ runIt "ghc-pkg" ["init", packageDb]
+    -- find which packages need to be installed
+    alreadyInstalledPackagesRaw <- runIt "ghc-pkg" ["list"
+                                                   ,"--package-db"
+                                                   ,packageDb]
+    putStrLn alreadyInstalledPackagesRaw
+    let alreadyInstalledPackages = parseGhcPkgList alreadyInstalledPackagesRaw
+        packagesToInstall = tempWantPackages \\ alreadyInstalledPackages
+        wantedTarballs = map (`addExtension` "tar.gz") packagesToInstall
+    -- find which packages also need to be downloaded
+    filesInCwd <- getDirectoryContents "."
+    let tarballsToDownload = wantedTarballs \\ filesInCwd
+    putStrLn $ show tarballsToDownload
 
-  -- TODO: consider installing Cabal from relative path if not found
-  -- and we are in a git repo. This is to help running bootstrap for a
-  -- unrelease cabal-install
+    -- TODO: consider installing Cabal from relative path if not found
+    -- and we are in a git repo. This is to help running bootstrap for a
+    -- unrelease cabal-install
 
-  -- download package: TODO
-  -- unpack and install package
-  let unpackPackage p = do
-          deleteDirIfExists p
-          runIt2 "tar" ["xf", p ++ ".tar.gz"]
-  let installPackage p = withDirectory p $ do
-          -- let (packageName,packageVersion) = splitPackageName p
-          putStrLn =<< runIt "ghc"
-              (words "--make Setup -o Setup -package-db "
-               ++ [packageDb, "-j"])
-          let args = ["--prefix=" ++ sandboxPath
-                     ,"--package-db=" ++ packageDb]
-                     ++ words "--disable-library-profiling --disable-shared --disable-split-objs --enable-executable-stripping --disable-tests"
-  -- args="${CABAL_PACKAGE_ARGS} --prefix=${SANDBOX} --with-compiler=${GHC}"
-  -- args="$args --with-hc-pkg=${GHC_PKG} --with-gcc=${CC} --with-ld=${LD}"
-  -- args="$args --disable-library-profiling --disable-shared"
-  -- args="$args --disable-split-objs --enable-executable-stripping"
-  -- args="$args --disable-tests ${VERBOSE} $CONSTRAINTS"
-          runIt2 "./Setup" ("configure":args)
-          runIt2 "./Setup" ["build","-j"]
-          runIt2 "./Setup" ["install"]
-      doPackage p = unpackPackage p >> installPackage p
-  mapM_ doPackage packagesToInstall
-  installPackage "."
+    -- download package: TODO
+    -- unpack and install package
+    let unpackPackage p = do
+            deleteDirIfExists p
+            runIt2 "tar" ["xf", p ++ ".tar.gz"]
+    let installPackage p = withDirectory p $ do
+            -- let (packageName,packageVersion) = splitPackageName p
+            putStrLn =<< runIt "ghc"
+                (words "--make Setup -o Setup -package-db "
+                 ++ [packageDb, "-j"])
+            let args = ["--prefix=" ++ sandboxPath
+                       ,"--package-db=" ++ packageDb]
+                       ++ words "--disable-library-profiling --disable-shared --disable-split-objs --enable-executable-stripping --disable-tests"
+    -- args="${CABAL_PACKAGE_ARGS} --prefix=${SANDBOX} --with-compiler=${GHC}"
+    -- args="$args --with-hc-pkg=${GHC_PKG} --with-gcc=${CC} --with-ld=${LD}"
+    -- args="$args --disable-library-profiling --disable-shared"
+    -- args="$args --disable-split-objs --enable-executable-stripping"
+    -- args="$args --disable-tests ${VERBOSE} $CONSTRAINTS"
+            runIt2 "./Setup" ("configure":args)
+            runIt2 "./Setup" ["build","-j"]
+            runIt2 "./Setup" ["install"]
+        doPackage p = unpackPackage p >> installPackage p
+    mapM_ doPackage packagesToInstall
+    installPackage "."
 
-  -- build cabal-install itself
-  
-  return ()
+    -- build cabal-install itself
+
+    return ()
   where
     withDirectory d f =
         bracket (do
