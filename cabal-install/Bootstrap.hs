@@ -2,7 +2,35 @@
 
 bootstrap cabal-install on a system without cabal-install.
 
-This needs a dependency file, see GenerateBootstrapDependencies.hs
+This needs a dependency file, see GenerateBootstrapDeps.hs
+
+TODO:
+limit the package access
+do the hack for Cabal and older versions of ghc
+add verbose modes and hide stuff otherwise
+review using env vars
+find out about the temp dir stuff
+check the CC, LINK, etc.
+check using custom deps file
+get the sandbox package name properly
+
+do dry run mode
+
+add the post comments
+
+test with bogus packages in global and user package databases
+download packages
+
+do jobs properly
+
+install mode for git repo - find Cabal
+fix tar usage to be same as bootstrap.sh
+--make: add package args, --with args, verbose
+
+test with all ghc versions + generate deps
+write script to generate deps?
+
+hlint, tidy, document, etc.
 
 -}
 
@@ -21,49 +49,62 @@ import System.IO.Error
 import qualified Control.Exception as C
 import Control.Concurrent
 import System.Environment
+import Control.Applicative
 --import Control.Monad.Error
 
 die :: String -> IO ()
 die e = hPutStrLn stderr e >> exitWith (ExitFailure 1)
 
-tempWantPackages :: [String]
-tempWantPackages =
-    ["Cabal-1.22.0.0"
-    ,"network-2.6.0.2"
-    ,"random-1.1"
-    ,"stm-2.4.4"
-    ,"text-1.2.0.3"
-    ,"transformers-0.4.2.0"
-    ,"mtl-2.2.1"
-    ,"parsec-3.1.7"
-    ,"network-uri-2.6.0.1"
-    ,"HTTP-4000.2.19"
-    ,"zlib-0.5.4.2"]
-
+data Deps = Deps
+            {builtinDependencies :: [String]
+            ,extraDependencies :: [String]}
+            deriving Show
 
 main :: IO ()
 main = do
     -- check for verbose
     -- check CC, LINK, LD, GHC, GHC-PKG
+    ghcVer <- strip <$> runIt "ghc" ["--numeric-version"]
     -- check running in right directory
     -- lazily find a download program
+    x <- getArgs
+    depsData <- do
+         let depsFile = case x of
+                        [] -> "bootstrap-deps-ghc-" ++ ghcVer
+                        [a] -> a
+                        _ -> error $ "please pass exactly one argument to set the dependency file manually, or no arguments to use a default dependency file"
+         putStrLn $ "[" ++ depsFile ++ "]"
+         depsFileExist <- doesFileExist depsFile
+         unless depsFileExist $ error $ "dependency file not found: " ++ depsFile
+         f <- readFile depsFile
+         putStrLn $ "----\n" ++ f ++ "\n----"
+         return $ parseDepsFile f
+    putStrLn $ show depsData
     cwdOk <- doesFileExist "./cabal-install.cabal"
     unless cwdOk $ die "The Bootstrap.hs program must be run in the cabal-install directory"
     -- create sandbox
     currentDirectory <- getCurrentDirectory
     let sandboxPath = currentDirectory </> ".cabal-sandbox"
-        packageDb = sandboxPath </> "x86_64-linux-ghc-7.8.4-packages.conf.d"
+        ghcArch = "x86_64-linux-ghc" -- TODO: do this properly
+        packageDb = sandboxPath </> ghcArch ++ "-" ++ ghcVer ++ "-packages.conf.d"
     putStrLn packageDb
     packageDbAlready <- doesDirectoryExist packageDb
     putStrLn $ show packageDbAlready
     unless packageDbAlready $ void $ runIt "ghc-pkg" ["init", packageDb]
+    let (a,b) = splitVer ghcVer
+        ghcJobs = case (safeRead a, safeRead b) of
+                         (Just x, Just y) | x >= 7 && y >= 9 -> "-j"
+                         _ -> ""
+        ghcPkgArg = case (safeRead a, safeRead b) of
+                         (Just x, Just y) | x <= 7 && y <= 4 -> "package-conf"
+                         _ -> "package-db"
     -- find which packages need to be installed
     alreadyInstalledPackagesRaw <- runIt "ghc-pkg" ["list"
-                                                   ,"--package-db"
+                                                   ,"--" ++ ghcPkgArg
                                                    ,packageDb]
     putStrLn alreadyInstalledPackagesRaw
     let alreadyInstalledPackages = parseGhcPkgList alreadyInstalledPackagesRaw
-        packagesToInstall = tempWantPackages \\ alreadyInstalledPackages
+        packagesToInstall = extraDependencies depsData \\ alreadyInstalledPackages
         wantedTarballs = map (`addExtension` "tar.gz") packagesToInstall
     -- find which packages also need to be downloaded
     filesInCwd <- getDirectoryContents "."
@@ -77,13 +118,24 @@ main = do
     -- download package: TODO
     -- unpack and install package
     let unpackPackage p = do
+            putStrLn $ "unpack " ++ p
             deleteDirIfExists p
+            putStrLn "tar"
             runIt2 "tar" ["xf", p ++ ".tar.gz"]
+        cabalJobs = ""
+        --(cabalMaj,cabalMin) = splitVer
     let installPackage p = withDirectory p $ do
+            putStrLn $ "install " ++ p
             -- let (packageName,packageVersion) = splitPackageName p
-            putStrLn =<< runIt "ghc"
-                (words "--make Setup -o Setup -package-db "
-                 ++ [packageDb, "-j"])
+            setupExists <- doesFileExist "Setup"
+            when setupExists $ do
+                -- todo: check if executable
+                runIt2 "./Setup" ["clean"]
+                removeFile "Setup"
+            runIt2 "ghc"
+                (words ("--make Setup -o Setup -" ++ ghcPkgArg)
+                 ++ [packageDb, ghcJobs])
+                -- ${GHC} --make Setup -o Setup ${GHC_PACKAGE_ARGS} ${GHC_JOBS} ${GHC_CONSTRAINTS}
             let args = ["--prefix=" ++ sandboxPath
                        ,"--package-db=" ++ packageDb]
                        ++ words "--disable-library-profiling --disable-shared --disable-split-objs --enable-executable-stripping --disable-tests"
@@ -93,7 +145,7 @@ main = do
     -- args="$args --disable-split-objs --enable-executable-stripping"
     -- args="$args --disable-tests ${VERBOSE} $CONSTRAINTS"
             runIt2 "./Setup" ("configure":args)
-            runIt2 "./Setup" ["build","-j"]
+            runIt2 "./Setup" ["build", cabalJobs]
             runIt2 "./Setup" ["install"]
         doPackage p = unpackPackage p >> installPackage p
     mapM_ doPackage packagesToInstall
@@ -128,8 +180,30 @@ main = do
     splitPackageName x = let y = reverse x
                          in ((reverse . tail) *** reverse)
                             $ swap $ break (=='-') y
-    deleteDirIfExists x =
-        removeDirectoryRecursive x
+    deleteDirIfExists x = do
+        y <- doesDirectoryExist x
+        when y $ removeDirectoryRecursive x
+    splitVer x = let (a,x') = break (=='.') x
+                     (b,x'') = break (=='.') $ drop 1 x'
+                 in (a,b)
+    safeRead :: String -> Maybe Integer
+    safeRead n = if all isDigit n
+                 then Just $ read n
+                 else Nothing
+    parseDepsFile f =
+        let want x | null $ strip x = False
+            want _ = True
+            ls = filter want $ lines f
+            f1 = "builtin-dependencies:"
+            f2 = "extra-dependencies:"
+        in case ls of
+               [a,b] | f1 `isPrefixOf` a && f2 `isPrefixOf` b
+                       -> Deps (words $ drop (length f1) a)
+                               (words $ drop (length f2) b)
+                     | otherwise -> error $ "bad field names in dependency file, expected " ++ f1 ++ " then " ++ f2 ++ ", got " ++ a ++ "\n" ++ b
+               _ -> error $ "bad format in dependencies file, expected 2 lines"
+--builtin-dependencies: array-0.5.0.0 etc. space separated
+--extra-dependencies: Cabal-1.22.0.0 etc. space separated
 
 
 myReadProcess

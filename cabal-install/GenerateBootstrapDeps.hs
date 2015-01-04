@@ -4,19 +4,18 @@
 This program uses an already built cabal-install executable to create
 the dependency list for bootstrap.sh.
 
-The goals of the dependency generator are to create a reliable
-bootstrap process, which can ignore extra packages installed in the
-global and user package database. This is to help in more cases than
-just bootstrapping on a freshly installed GHC.
+It generates a list of package which come with GHC, and an additional
+list of packages to add to this so that cabal-install can be built.
 
-If you have changed some of the packages which come with GHC in the
-global package database then run bootstrap.sh, all bets are off,
-otherwise the bootstrap.sh should always work with these dependencies.
+These lists are used control exactly what packages are used when
+bootstrap.hs builds the dependencies and cabal-install. This is to
+help increase the reliability when you have extra packages installed
+in your global and/or user package database.
 
-Overview: run ghc-pkg list and get the unhidden global packages. Run
-cabal install cabal-install --dry-run in a sandbox and get the extra
-packages needed. This list is specific to the version of GHC you are
-using.
+Operation overview: run ghc-pkg list and get the unhidden global
+packages. Run cabal install cabal-install --dry-run in a sandbox and
+get the extra packages needed. This list is specific to the version of
+GHC you are using.
 
 Using ghc-pkg list along with cabal-install is a replacement for
 asking cabal-install for all the dependencies and versions, since
@@ -40,37 +39,34 @@ cabal-install which is already working.
 3. run 'cabal update' to get the latest package descriptions from
 hackage
 
-4. run 'runhaskell BootstrapShDeps.hs > bootstrap-ghc-VER'
-
-5. edit bootstrap.sh where it sets the DEPENDENCY_FILE variable
+4. run 'runhaskell GenerateBootstrapDeps.hs > bootstrap-ghc-VER'
 
 The same process can be used to update the dependencies for other
 versions of GHC when Cabal/cabal-install is updated. (This should be
 scripted since it is a little tedious.)
 
 The format of the dependency files is:
+line 1:
+builtin-dependencies: package-ver package-ver
 
-line 1: the packages arguments to pass to ghc --make Setup.hs to
-include all the needed packages which come with GHC
-line 2: the same information, but as constraints to be passed to
-./Setup
+this has all the dependencies which we expect to find in the global
+package database
 
-the rest of the lines contain the additional packages to download and
-install in the correct order. These lines have the package name first,
-then a space, then the version.
+line 2:
+extra-dependencies: package-ver package-ver
+all the extra dependencies to install to allow cabal-install to build
 
-The reason the file is this weird format is to make it easy to use
-from the bootstrap.sh without loads of crazy
-regex/sed/awk/etc. hacking in the .sh file.
+example (for unreleased cabal-install 1.22.0.0):
+
+builtin-dependencies: array-0.5.0.0 base-4.7.0.2 bin-package-db-0.0.0.0 binary-0.7.1.0 rts-1.0 bytestring-0.10.4.0 containers-0.5.5.1 deepseq-1.3.0.2 directory-1.2.1.0 filepath-1.3.0.2 ghc-prim-0.3.1.0 haskeline-0.7.1.2 hoopl-3.10.0.1 hpc-0.6.0.1 integer-gmp-0.5.1.0 old-locale-1.0.0.6 old-time-1.1.0.2 pretty-1.1.1.1 process-1.2.0.0 template-haskell-2.9.0.0 terminfo-0.4.0.0 time-1.4.2 unix-2.7.0.1 xhtml-3000.2.1
+extra-dependencies: Cabal-1.22.0.0 network-2.6.0.2 random-1.1 stm-2.4.4 text-1.2.0.3 transformers-0.4.2.0 mtl-2.2.1 parsec-3.1.7 network-uri-2.6.0.1 HTTP-4000.2.19 zlib-0.5.4.2
 
 TODO: verbose mode - show commands being run, and output
-better error handling to detect readProcess errors, etc.
-add option to automatically delete the sandbox if it already exists
+better error handling?
+always delete the sandbox before exiting, and error if it already
+  exists
 get all dependecies from cabal-install instead of cabal-install +
   ghc-pkg list
-explicitly use the packages which come with ghc, and explicitly
-  reinstall all the others always, even if they have also been added to
-  the global package database
 a script to generate all the deps files for supported versions of ghc
   for a new version of Cabal/cabal-install automatically.
 a script to run automated tests for the bootstrap.sh on supported
@@ -83,47 +79,6 @@ set the path
 generate the deps file or// run bootstrap and see if it succeeds
 
 
-print:
-ghc version to double check
-first list ghc version dependencies
-then list cabal install dependencies
-e.g.
-
-ghc-7.6.3
-builtin-dependencies: array-0.5.0.0 etc. space separated
-extra-dependencies: Cabal-1.22.0.0 etc. space separated
-
-then use another helper for the bootstrap.sh:
-split package into name and version? for the scripting
-
-what does the script do?
-check:
-  temp dir
-  CC
-  LINK
-  LD
-  current dir
-  ghc, ghc-pkg
-
-set jobs arg
-
-create sandbox
-
-package args stuff
-
-check installed packages
-list of tasks:
-download package if not there
-unpack package fresh unconditionally
-install package:
-  build Setup
-  configure
-  build
-  install
-
-
-
-
 
 -}
 
@@ -134,15 +89,15 @@ import Data.Tuple
 import Control.Arrow
 import System.Directory
 import Control.Monad
+import Control.Exception
 
 main :: IO ()
 main = do
     e <- doesDirectoryExist "bootstrap-deps-sandbox"
-    when (e) $ void
-      $ readProcess "cabal" ["sandbox", "delete"
-                            ,"--sandbox=bootstrap-deps-sandbox"] ""
+    when (e) $ error "please delete or rename the directory bootstrap-deps-sandbox"
     _ <- readProcess "cabal" ["sandbox", "init"
                         ,"--sandbox=bootstrap-deps-sandbox"] ""
+    alwaysDeleteDir "bootstrap-deps-sandbox" $ do
     -- get the packages in the global package database
     -- assume these are only the packages which come with ghc
     ghcPkgList' <- readProcess "ghc-pkg" ["list", "--global"] ""
@@ -180,18 +135,29 @@ main = do
         noCabalInstall = filter ((/= "cabal-install") . fst) cabalSplit
         showPackageList = intercalate "\n" . map (\(a,b) -> a ++ " " ++ b)
         unsplitPackageName (a,b) = a ++ "-" ++ b
+    putStrLn $ "builtin-dependencies: "
+               ++ intercalate " " (map unsplitPackageName keepGhc)
+    putStrLn $ "extra-dependencies: "
+               ++ intercalate " " (map unsplitPackageName noCabalInstall)
     -- output the packages which come with GHC in ghc argument format
-    putStrLn $ "-hide-all-packages " ++ (intercalate " "
-             $ map (\(a,b) -> ("-package " ++ a ++ "-" ++ b))
-               keepGhc)
+    --putStrLn $ "-hide-all-packages " ++ (intercalate " "
+    --         $ map (\(a,b) -> ("-package " ++ a ++ "-" ++ b))
+    --           keepGhc)
     -- output the packages which come with GHC in ./Setup argument format
-    putStrLn $ intercalate " "
-             $ map (\(a,b) -> ("--constraint=" ++ a ++ "==" ++ b))
-               keepGhc
+    --putStrLn $ intercalate " "
+    --         $ map (\(a,b) -> ("--constraint=" ++ a ++ "==" ++ b))
+    --           keepGhc
     -- output the other packages which must be installed before
     -- installing cabal-install
-    putStrLn $ showPackageList noCabalInstall
+    --putStrLn $ showPackageList noCabalInstall
   where
+    alwaysDeleteDir d f =
+        bracket (return ())
+                (const $ deleteDirIfExists d)
+                $ const f
+    deleteDirIfExists x = do
+        y <- doesDirectoryExist x
+        when y $ removeDirectoryRecursive x
     cabalInstallListLine = "In order, the following would be installed"
     filterCabalInstallList [] =
         error "didn't find marker line in cabal install cabal-install --dry-run"
@@ -206,6 +172,7 @@ main = do
     splitPackageName x = let y = reverse x
                          in ((reverse . tail) *** reverse)
                             $ swap $ break (=='-') y
+    unsplitPackageName (a,b) = a ++ "-" ++ b
     -- remove stuff like (latest: 1.2.1.0) from end of lines
     noNotes x = if '(' `elem` x
                 then reverse $ drop 1 $ dropWhile (/='(') $ reverse x
