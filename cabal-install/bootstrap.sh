@@ -13,6 +13,9 @@
 
 # It should work on other posix systems ...
 
+# The dependency files can be generated using cabal-install, see the
+# BoostrapShDep.hs file for details
+
 die () { printf "\nError during cabal-install bootstrap:\n$1\n" >&2 && exit 2 ;}
 
 # you can override this variable for debugging
@@ -112,7 +115,7 @@ PACKAGEDB="$SANDBOX/${GHC_ARCH}-ghc-${GHC_VER}-packages.conf.d"
 [ ! -r "$PACKAGEDB" ] && ${GHC_PKG} init "$PACKAGEDB"
 
 GHC_PACKAGE_ARGS="-package-db $PACKAGEDB"
-CABAL_PACKAGE_ARGS="--user --package-db=$PACKAGEDB"
+CABAL_PACKAGE_ARGS="--package-db=$PACKAGEDB"
 GHC_PKG_PACKAGE_ARGS=$CABAL_PACKAGE_ARGS
 # support the old argument names in ghc and ghc-pkg in ghc-7.4 and
 # earlier
@@ -129,7 +132,7 @@ HACKAGE_URL="https://hackage.haskell.org/package"
 
 # Cache the list of packages:
 echo "Checking installed packages for ghc-${GHC_VER}..."
-${GHC_PKG} list --global $GHC_PKG_PACKAGE_ARGS > ghc-pkg.list ||
+${GHC_PKG} list $GHC_PKG_PACKAGE_ARGS > ghc-pkg.list ||
   die "running '${GHC_PKG} list --global $GHC_PKG_PACKAGE_ARGS' failed"
 
 # Will we need to install this package, or is it already installed?
@@ -196,18 +199,6 @@ unpack_pkg () {
 }
 
 
-# the constraints variable is used to try to limit calling the Setup
-# configure with just the correct versions of the dependency
-# packages. This is to avoid situations where Cabal doesn't pick the
-# version of a dependency we want which can happen since we install
-# the packages one by one. This is only relevant when you run
-# bootstrap on a installation of ghc with extra packages in the global
-# and/or packages in the user package database. I'm not 100% sure this
-# is still needed since we compile any needed packages in a separate
-# package database.
-
-CONSTRAINTS=""
-
 # use -j when running Setup.hs files when we have a new enough Cabal
 CABAL_JOBS=""
 
@@ -220,8 +211,8 @@ install_pkg () {
   [ -x Setup ] && ./Setup clean
   [ -f Setup ] && rm Setup
 
-  [ -n "$VERBOSE" ] && echo ${GHC} --make Setup -o Setup ${GHC_PACKAGE_ARGS} $GHC_JOBS
-  ${GHC} --make Setup -o Setup ${GHC_PACKAGE_ARGS} $GHC_JOBS ||
+  [ -n "$VERBOSE" ] && echo ${GHC} --make Setup -o Setup ${GHC_PACKAGE_ARGS} ${GHC_JOBS} ${GHC_CONSTRAINTS}
+  ${GHC} --make Setup -o Setup ${GHC_PACKAGE_ARGS} ${GHC_JOBS} ${GHC_CONSTRAINTS} ||
     die "Compiling the Setup script failed."
 
   [ -x Setup ] || die "The Setup script does not exist or cannot be run"
@@ -232,7 +223,7 @@ install_pkg () {
   args="$args --disable-split-objs --enable-executable-stripping"
   args="$args --disable-tests ${VERBOSE} $CONSTRAINTS"
 
-  [ -n "$VERBOSE" ] && echo ${GHC} ./Setup configure $args
+  [ -n "$VERBOSE" ] && echo ./Setup configure $args
   ./Setup configure $args || die "Configuring the ${PKG} package failed."
 
   [ -n "$VERBOSE" ] && echo ./Setup build $CABAL_JOBS ${VERBOSE}
@@ -265,50 +256,80 @@ do_pkg () {
 }
 
 ############################
-# Actually do something!
+# check args and find dependency file
 
-if [ -n "$(echo ${GHC_VER} | egrep '^7\.10\.')" ]
+usage () {
+
+    echo $1
+    echo "usage: bootstrap.sh [dependency_file]"
+    echo
+    echo "If the dependency file is not specified then a built in one"
+    echo "based on the GHC version will be used. Usually this is what"
+    echo "you want."
+    echo
+    exit
+}
+
+
+if [ "$#" -eq 1 ]
 then
-    DEPENDENCY_FILE=bootstrap-ghc-7.10.1-deps
-elif [ -n "$(echo ${GHC_VER} | egrep '^7\.8\.')" ]
+    DEPENDENCY_FILE="$1"
+    [ ! -r "$DEPENDENCY_FILE" ] && usage "Supplied more than one dependency filename"
+elif [ "$#" -eq 0 ]
 then
-    DEPENDENCY_FILE=bootstrap-ghc-7.8.1-deps
-elif [ -n "$(echo ${GHC_VER} | egrep '^7\.6\.')" ]
-then
-    DEPENDENCY_FILE=bootstrap-ghc-7.6.1-deps
-elif [ -n "$(echo ${GHC_VER} | egrep '^7\.4\.')" ]
-then
-    DEPENDENCY_FILE=bootstrap-ghc-7.4.1-deps
-elif [ -n "$(echo ${GHC_VER} | egrep '^7\.2\.')" ]
-then
-    DEPENDENCY_FILE=bootstrap-ghc-7.2.1-deps
+    DEPENDENCY_FILE="bootstrap-deps-${GHC}-${GHC_VER}"
+    if [ ! -r $DEPENDENCY_FILE ]
+    then
+        echo "Warning: unsupported version of GHC ${GHC}-${GHC_VER}, using latest GHC deps"
+        DEPENDENCY_FILE=bootstrap-deps-ghc-7.8.4
+    fi
 else
-    echo "Warning: unsupported version of GHC $GHC_VER, using latest GHC deps"
-    DEPENDENCY_FILE=bootstrap-ghc-7.8.1-deps
+    die "please pass only one argument if you want to override the dependencies"
 fi
+
+############################
+# Actually do something!
 
 echo Using dependencies from file $DEPENDENCY_FILE
 
+SKIP=2
 while read dep; do
-    package_name=${dep%%" "*}
-    package_version=${dep#*" "}
-    info_pkg $package_name $package_version
+    # skip the first two lines, these contain the dependency information
+    # for the packages which come with GHC
+    if [ "$SKIP" -eq 2 ]; then SKIP=1
+    elif [ "$SKIP" -eq 1 ]; then SKIP=0
+    else
+        package_name=${dep%%" "*}
+        package_version=${dep#*" "}
+        info_pkg $package_name $package_version
+    fi
 done <$DEPENDENCY_FILE
 
+GHC_CONSTRAINTS=
+CONSTRAINTS=
+
 while read dep; do
-    package_name=${dep%%" "*}
-    package_version=${dep#*" "}
-    do_pkg $package_name $package_version
-    CONSTRAINTS="$CONSTRAINTS --constraint=$package_name==$package_version"
+    # the first line contains the ghc dependencies in ghc format
+    # the second line contains the ghc dependencies in cabal format
+    if [ -z "$GHC_CONSTRAINTS" ]
+    then
+        GHC_CONSTRAINTS="$dep"
+    elif [ -z "$CONSTRAINTS" ]
+    then
+        CONSTRAINTS="$dep"
+    else
+        package_name=${dep%%" "*}
+        package_version=${dep#*" "}
+        do_pkg $package_name $package_version
+        CONSTRAINTS="$CONSTRAINTS --constraint=$package_name==$package_version"
+        GHC_CONSTRAINTS="$GHC_CONSTRAINTS -package $package_name-$package_version"
+    fi
 done <$DEPENDENCY_FILE
 
 install_pkg "cabal-install"
 
-# Use the newly built cabal to turn the prefix/package database into a
-# legit cabal sandbox. This works because 'cabal sandbox init' will
-# reuse the already existing package database and other files if they
-# are in the expected locations. This isn't really useful for
-# bootstrapping except for debugging
+# For debugging, turn the 'sandbox' into a real sandbox with a silly
+# hack
 $SANDBOX/bin/cabal sandbox init --sandbox $SANDBOX
 
 echo
