@@ -135,14 +135,14 @@ data Settings = Settings
 
 defaultSettings :: Settings
 defaultSettings = Settings
-    {hackageUrl = --"https://hackage.haskell.org/package"
-                  "file:///home/jake/wd/cabal/tarballs"
+    {hackageUrl = "https://hackage.haskell.org/package"
+                  --"file:///home/jake/wd/cabal/tarballs"
     ,wget = "wget"
     ,curl = "curl"
     ,fetch = "fetch"
     ,tar = "tar"
-    ,scriptVerbose = False -- set to True to output the main actions
-                           -- the script does all the command lines
+    ,scriptVerbose = True  -- set to True to output the main actions
+                           -- this script does all the command lines
                            -- run and the output from most of the
                            -- commands run
     ,dryRun = False -- stop after reporting everything that will be
@@ -395,10 +395,7 @@ bootstrapCabalInstall s = do
     installPackage "."
 
     ----------------------------------------
-
-    -- finished, check cabal executable (not sure if this is really
-    -- needed, just copying how the bootstrap.sh work)
-    -- output final message to user
+    -- finished, check the exe and let the user know
     let cabalDir = sandboxPrefix </> "bin"
         cabalPath = cabalDir </> "cabal"
     runWithOutput True cabalPath ["--version"]
