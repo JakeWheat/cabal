@@ -73,7 +73,6 @@ install mode for git repo - find Cabal in ../Cabal instead of trying
   to download from hackage
 timestamps on task output
 [N/M] on task output for rough progress
-just run 'cabal --version' at end of build to check it
 
 test with bogus packages in global and user package databases
 
@@ -120,24 +119,24 @@ import Data.IORef
 
 data Settings = Settings
     {hackageUrl :: String
-    ,wget :: String
-    ,curl :: String
-    ,fetch :: String
-    ,tar :: String
+    ,wget :: FilePath
+    ,curl :: FilePath
+    ,fetch :: FilePath
+    ,tar :: FilePath
     ,scriptVerbose :: Bool
     ,dryRun :: Bool
     ,ghcCabalVerbose :: String
-    ,commandLineDepsFile :: Maybe String
-    ,ghc :: String
-    ,ghcPkg :: String
-    ,cabalInstall :: String
-    ,ccOverride :: Maybe String
+    ,commandLineDepsFile :: Maybe FilePath
+    ,ghc :: FilePath
+    ,ghcPkg :: FilePath
+    ,cabalInstall :: FilePath
+    ,ccOverride :: Maybe FilePath
     } deriving Show
 
 defaultSettings :: Settings
 defaultSettings = Settings
-    {hackageUrl = "https://hackage.haskell.org/package"
-                  --"file:///home/jake/wd/cabal/tarballs"
+    {hackageUrl = --"https://hackage.haskell.org/package"
+                  "file:///home/jake/wd/cabal/tarballs"
     ,wget = "wget"
     ,curl = "curl"
     ,fetch = "fetch"
@@ -327,7 +326,7 @@ bootstrapCabalInstall s = do
     -- helper functions for unpacking and installing packages
     let unpackPackage p = do
             deleteDirIfExists sv p
-            runWithOutput sv "tar" ["-xf", p `addExtension` "tar.gz"]
+            runWithOutput sv (tar s) ["-xf", p `addExtension` "tar.gz"]
     let installPackage p = withDirectory sv p $ do
             setupExists <- doesFileExist "Setup"
             when setupExists $ do
@@ -336,8 +335,11 @@ bootstrapCabalInstall s = do
                 when sv $ putStrLn "rm Setup"
                 removeFile "Setup"
             -- limit the packages available to 'ghc Setup.hs' and ./Setup
-            -- small trick is to keep the ghc Cabal if there is one until we
-            -- install the new Cabal for this cabal-install
+            -- a small trick used here is to keep the ghc Cabal if
+            -- there is one until we install the new Cabal for this
+            -- cabal-install. This doesn't seem to be needed for newer
+            -- ghcs but when you specify two Cabal versions for old
+            -- ghcs they fail
             let isCabal = ("Cabal-" `isPrefixOf`)
                 hasCabal l = case find isCabal l of
                                 Just _ -> True
@@ -399,16 +401,13 @@ bootstrapCabalInstall s = do
     -- output final message to user
     let cabalDir = sandboxPrefix </> "bin"
         cabalPath = cabalDir </> "cabal"
-    cabalBuilt <- doesFileExist cabalPath
-    unless cabalBuilt $ error "cabal executable doesn't exist after building"
-    x <- isExecutable cabalPath
-    unless x $ error "cabal executable isn't executable after buliding"
+    runWithOutput True cabalPath ["--version"]
+
     putStrLn $ "\n\ncabal-install has been installed at\n"
         ++ cabalPath ++ "\n"
         ++ "next steps:\n"
         ++ "  put the cabal binary in your path\n"
         ++ "  run 'cabal update'"
-    return ()
   where
     dropTarballExtension f =
         if ".tar.gz" `isSuffixOf` f
