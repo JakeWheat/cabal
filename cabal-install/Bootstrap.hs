@@ -21,8 +21,8 @@ tested with ghc 7.2.2, 7.4.2, 7.6.3, 7.8.4, 7.10.0-20141222
 It should work on other posix systems ...
 
 Doesn't currently use any shell, needs: ghc, c compiler (gcc, clang,
-cc, icc found automatically), wget/curl/fetch, which, a tar that knows
-how to run gzip, /dev/null.
+cc, icc found automatically, only gcc tested), curl/wget/fetch, which,
+a tar (that knows how to run gzip itself), /dev/null.
 
 
 Maintenance notes
@@ -54,7 +54,7 @@ file. I'm not sure how portable these dependency files are across
 different operating systems.
 
 Hint: to run Bootstrap on a development version of cabal-install, run
-cabal sdist in the ../Cabal dir then move the
+cabal sdist in the ../Cabal dir, then move the
 ../Cabal/dist/Cabal-X.X.X.X.tar.gz tarball to the cabal-install
 dir. (There is a small catch 22 here. This can be fixed by teaching
 Bootstrap how to compile Cabal directly from the ../Cabal/ dir).
@@ -64,8 +64,9 @@ Bootstrap how to compile Cabal directly from the ../Cabal/ dir).
 Compared with bootstrap.sh
 
 it mostly does something similar. It calls out to external programs to
-do a bunch of work (since of course it doesn't have many libraries
-available). It doesn't use any shell so should be a bit more portable.
+do a bunch of work, instead of using haskell libraries since they
+aren't available yet. It doesn't use any shell so might be easy to
+make portable than the sh.
 
 The big change is that you generate the dependencies ahead of time
 (using a working cabal-install), then when Bootstrap is run, it
@@ -84,8 +85,35 @@ It builds in a sandbox, and builds without shared, profiling,
 haddock, does stripping, no split objs and with optimisation. There is
 no straightforward way to modify this for a user, but this code could
 easily be fixed to change these aspects if wanted (including
-recreating how bootstrap.sh chooses dependencies). I think this would
-be a bad idea for maintenance and reliability.
+recreating how bootstrap.sh chooses dependencies).
+
+I think supporting the old way the .sh works would be a bad idea for
+maintenance and reliability.
+
+Design motivation:
+
+supporting shared, profiling, haddock is good if you want to install
+to user packagedb, but this creates all these extra moving parts to
+support. You can easily install things any way you like to the user
+packagedb with the real cabal install which this bootstrap
+creates. Haddock already caused a problem with network-uri. By
+avoiding the user package database, and additions to the global
+package database, we can install with a consistent set of
+packages. This definitely causes problems in the previous system where
+you had extra versions of packages installed, and then the
+bootstrapping failed because it didn't know which version to use or
+used the wrong version. This also eliminates the possibility of
+reusing a correct version of a package in user package db which is
+linked to another package with a version which is incompatible with
+the other dependencies for cabal-install, which is probably unlikely
+but still possible. Although these problems cannot occur with a fresh
+install of ghc, they can when you have packages already installed
+which can happen in a number of situations including when you
+accidently delete the cabal install binary, or are maintaining/testing
+the Bootstrap.hs itself.  For the dependencies, fixing them ahead of
+time with cabal-install means that the bootstrap should fail much less
+often (not sure if this happens, but I think there have been some bugs
+related to the recent split of network).
 
 The main options that are easy to change are in the Settings struct,
 but I didn't add environment variables support or command line parsing
@@ -115,12 +143,18 @@ separate flag to run 'ghc Setup' and ./Setup with a verbose flag
 
 ------------------------------
 
-TODO ideas:
+TODO:
 
 fix the usage
 
 command line parsing
 environment parsing?
+
+run through and note which places can be cleaned up after dropping
+7.4, etc. support (check the arg names, plus the 2 Cabal deps - find
+out what is going on)
+
+ideas:
 
 ?find and check linker
 ?check cc works
@@ -128,8 +162,8 @@ environment parsing?
 ?fix code to run gzip/tar like bootstrap.sh
 install mode for git repo - find Cabal in ../Cabal instead of trying
   to download from hackage
-timestamps on task output
-[N/M] on task output for rough progress
+timestamps on task output, [N/M] on task output for rough progress:
+  make it a little more reassuring
 
 check downloaded package for integrity (using tar/gzip) to give better
 error message/help if download interrupted e.g.? Otherwise this is a
@@ -145,6 +179,14 @@ dependencies
 
 test bootstrap on ci
 test bootstrap on other operating systems on ci
+no idea how to do these or how feasible they are
+
+notes:
+more helper functions
+better env use
+better process runners, share the devnull
+run multighc tests with verbose and log output to file
+warnings about sandbox and tarballs in multitest
 
 -}
 
@@ -190,8 +232,8 @@ data Settings = Settings
 
 defaultSettings :: Settings
 defaultSettings = Settings
-    {hackageUrl = "https://hackage.haskell.org/package"
-                  --"file:///home/jake/wd/cabal/tarballs"
+    {hackageUrl = --"https://hackage.haskell.org/package"
+                  "file:///home/jake/wd/cabal/tarballs"
     ,wget = "wget"
     ,curl = "curl"
     ,fetch = "fetch"
@@ -228,13 +270,19 @@ main = do
              putStrLn $ "Usage:\n" ++
                  "  'runhaskell ./Bootstrap.hs' to bootstrap cabal-install\n" ++
                  "  'runhaskell ./Bootstrap.hs deps' to generate dependency " ++
-                 "file for current ghc"
+                 " file for current ghc\n" ++
+                 "  'runhaskell ./Bootstrap.hs depsMany dir' to generate " ++
+                 " dependency files for all ghcs in dir/\n" ++
+                 "  'runhaskell ./Bootstrap.hs test dir' to test bootstrap " ++
+                 " for all ghcs in dir/"
              error $ "unrecognised args " ++ unwords args
 
 bootstrapDepsFilename :: Settings -> String -> String
 bootstrapDepsFilename s ghcVer =
     fromMaybe ("bootstrap-deps-ghc-" ++ ghcVer)
     $ commandLineDepsFile s
+
+-- the main function which bootstraps a cabal-install executable
 
 bootstrapCabalInstall :: Settings -> IO ()
 bootstrapCabalInstall s = do
@@ -615,8 +663,8 @@ generateDependencies s = do
 -- e.g. "Cabal-1.22.0.0" -> ("Cabal", "1.22.0.0")
 splitPackageName :: String -> (String,String)
 splitPackageName x = let y = reverse x
-                         in ((reverse . drop 1) *** reverse)
-                            $ swap $ break (=='-') y
+                     in ((reverse . drop 1) *** reverse)
+                        $ swap $ break (=='-') y
 
 
 parseGhcPkgList :: String -> [String]
@@ -703,12 +751,10 @@ runWithOutput v cmd args = do
               else do
                    x <- openFile "/dev/null" ReadWriteMode
                    return $ UseHandle x
-    (Just inh, _, _, pid) <-
-        createProcess (proc cmd args){ std_in  = CreatePipe,
+    (_, _, _, pid) <-
+        createProcess (proc cmd args){ std_in  = Inherit,
                                        std_out = outErr,
                                        std_err = outErr}
-    -- not sure if this is the right way to do this
-    hClose inh -- done with stdin
     -- wait on the process
     ex <- waitForProcess pid
     case outErr of
@@ -740,16 +786,6 @@ runhaskell ./Bootstrap depsMany dirx
 and you can test the bootstrap process with each one using
 
 runhaskell ./Bootstrap.hs test dirx
-
-TODOs:
-more helper functions
-better env use
-don't shell out below
-better process runners, share the devnull
-run tests below with verbose and log output to file
-warnings about sandbox and tarballs
-errors and summarize at end
-
 
 -}
 
@@ -787,7 +823,6 @@ testVersion v = do
         whenM (doesFileExist target) $ removeFile target
         -- todo: don't catch ctrl-c and maybe a few other exceptions?
         res1 <- catch (do
-                       getCurrentDirectory >>= putStrLn
                        bootstrapCabalInstall defaultSettings
                        (c,p,e) <- readProcessWithExitCode target ["--version"] ""
                        putStrLn $ p ++ "\n" ++ e
